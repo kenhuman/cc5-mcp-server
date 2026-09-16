@@ -20,3 +20,13 @@ cc5-restart-verify.png
 # Python caches
 __pycache__/
 *.pyc
+
+# Private local configuration, credentials and live test output
+.env
+.env.*
+!.env.example
+*-token.txt
+*key.txt
+*.ccProject
+*.ccAvatar
+artifacts/

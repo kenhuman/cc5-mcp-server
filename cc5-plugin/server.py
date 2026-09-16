@@ -15,24 +15,49 @@ import queue
 import sys
 import threading
 import traceback
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import time
+import re
+from operations import Operations
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
 
 import cc5_api
+import headshot
+import morph_control
+import fitting
+from capabilities import get_capabilities
 
 RELOAD_SECRET = os.environ.get("CC5_RELOAD_SECRET", "")
-DEV_MODE = os.environ.get("CC5_DEV_MODE", "1") == "1"  # Default: dev mode on
-API_VERSION = "1.1.0"
+DEV_MODE = os.environ.get("CC5_DEV_MODE", "0") == "1"  # Development surfaces disabled by default
+API_VERSION = "1.2.0"
+BRIDGE_TOKEN = os.environ.get("CC5_BRIDGE_TOKEN", "")
+READ_ONLY = os.environ.get("CC5_READ_ONLY", "1") != "0"
+PAUSE_FILE = os.environ.get("CC5_PAUSE_FILE", os.path.join(os.path.expanduser("~"), ".cc5-mcp", "PAUSED"))
+operations = Operations()
+EXPERIMENTAL_ACTIONS = {
+    "export_fbx", "exec_python", "bake_skin_textures", "export_head_metahuman",
+    "silent_install_filter", "silent_trigger_dialog", "silent_configure_and_click",
+    "silent_finalize", "create_actor_mixer",
+}
+
+
+def execution_block(action):
+    if paused():
+        return "Automation pause marker is present"
+    if READ_ONLY and action not in READ_ACTIONS:
+        return "Bridge is read-only"
+    if action in EXPERIMENTAL_ACTIONS and os.environ.get("CC5_ALLOW_EXPERIMENTAL") != "1":
+        return "Operation requires live qualification; CC5_ALLOW_EXPERIMENTAL is disabled"
+    return None
+
+
+def paused():
+    return bool(PAUSE_FILE and os.path.exists(PAUSE_FILE))
+
 
 # Thread-safe command queue: HTTP thread -> main thread
 command_queue: queue.Queue = queue.Queue(maxsize=100)
-_store_lock = threading.Lock()
-response_store: dict[str, Any] = {}
-response_events: dict[str, threading.Event] = {}
-
-_command_counter = 0
-_counter_lock = threading.Lock()
 _processing = False  # Re-entrance guard for process_command_queue
 
 MAX_REQUEST_BYTES = 1 * 1024 * 1024  # 1 MB
@@ -41,16 +66,11 @@ MAX_REQUEST_BYTES = 1 * 1024 * 1024  # 1 MB
 _httpd: HTTPServer | None = None
 
 
-def _next_command_id() -> str:
-    global _command_counter
-    with _counter_lock:
-        _command_counter += 1
-        return f"cmd_{_command_counter}"
-
-
 # --- Required parameters per action (validated before queue dispatch) ---
 
 REQUIRED_PARAMS: dict[str, list[str]] = {
+    'headshot_configure': ['front', 'generate_hair', 'body'],
+    'headshot_generate': ['prepared_id'],
     "search_morphs":        ["query"],
     "get_morph_value":      ["morph_id"],
     "set_morph_value":      ["morph_id", "value"],
@@ -94,12 +114,33 @@ REQUIRED_PARAMS: dict[str, list[str]] = {
 # --- Dynamic dispatch tables (can be hot-patched at runtime) ---
 
 ACTION_MAP: dict[str, Any] = {
+    'morph_refresh': lambda p: morph_control.refresh(),
+    'fitting_morph_panel': lambda p: fitting.show_morph_panel(),
+    'fitting_load_side': lambda p: fitting.load_side_reference(**p),
+    'fitting_configure': lambda p: fitting.configure_refine(**p),
+    'morph_catalog_live': lambda p: morph_control.catalog(**p),
+    'morph_snapshot': lambda p: morph_control.snapshot(**p),
+    'morph_apply': lambda p: morph_control.apply(**p),
+    'morph_restore': lambda p: morph_control.restore(**p),
+    'fitting_sculpt_state': lambda p: fitting.sculpt_state(),
+    'fitting_sculpt_configure': lambda p: fitting.configure_sculpt(**p),
+    'fitting_open': lambda p: fitting.open_refine(**p),
+    'fitting_state': lambda p: fitting.refine_state(),
+    'fitting_move_point': lambda p: fitting.move_refine_point(**p),
+    'fitting_action': lambda p: fitting.refine_action(**p),
+    'fitting_close': lambda p: fitting.close_refine(),
+    'fitting_landmarks': lambda p: fitting.landmarks(**p),
+    'headshot_catalog': lambda p: headshot.catalog(),
+    'headshot_state': lambda p: headshot.state(),
+    'headshot_open': lambda p: headshot.open_dialog(p.get('front')),
+    'headshot_configure': lambda p: headshot.configure(p),
+    'headshot_generate': lambda p: headshot.generate(p['prepared_id']),
     "get_avatars":           lambda p: cc5_api.get_avatars(),
     "get_avatar_info":       lambda p: cc5_api.get_avatar_info(),
     "get_morph_catalog":     lambda p: cc5_api.get_morph_catalog(),
     "search_morphs":         lambda p: cc5_api.search_morphs(p["query"], p.get("category", "")),
     "get_morph_value":       lambda p: cc5_api.get_morph_value(p["morph_id"]),
-    "set_morph_value":       lambda p: cc5_api.set_morph_value(p["morph_id"], float(p["value"])),
+    "set_morph_value":       lambda p: cc5_api.set_morph_value(p["morph_id"], p["value"]),
     "set_multiple_morphs":   lambda p: cc5_api.set_multiple_morphs(p["morphs"]),
     "create_default_avatar": lambda p: cc5_api.create_default_avatar(),
     "delete_avatar":         lambda p: cc5_api.delete_avatar(p.get("name", "")),
@@ -190,6 +231,25 @@ ACTION_MAP: dict[str, Any] = {
 
 # POST path -> action name
 POST_ROUTES: dict[str, str] = {
+    '/morph-control/refresh': 'morph_refresh',
+    '/fitting/morph-panel': 'fitting_morph_panel',
+    '/fitting/load-side': 'fitting_load_side',
+    '/fitting/configure': 'fitting_configure',
+    '/morph-control/catalog': 'morph_catalog_live',
+    '/morph-control/snapshot': 'morph_snapshot',
+    '/morph-control/apply': 'morph_apply',
+    '/morph-control/restore': 'morph_restore',
+    '/fitting/sculpt-state': 'fitting_sculpt_state',
+    '/fitting/sculpt-configure': 'fitting_sculpt_configure',
+    '/fitting/open': 'fitting_open',
+    '/fitting/state': 'fitting_state',
+    '/fitting/move-point': 'fitting_move_point',
+    '/fitting/action': 'fitting_action',
+    '/fitting/close': 'fitting_close',
+    '/fitting/landmarks': 'fitting_landmarks',
+    '/headshot/open': 'headshot_open',
+    '/headshot/configure': 'headshot_configure',
+    '/headshot/generate': 'headshot_generate',
     "/morphs/search":    "search_morphs",
     "/morph/get":        "get_morph_value",
     "/morph/set":        "set_morph_value",
@@ -247,6 +307,8 @@ POST_ROUTES: dict[str, str] = {
 
 # GET path -> action name (None = handle inline)
 GET_ROUTES: dict[str, str | None] = {
+    '/headshot/catalog': 'headshot_catalog',
+    '/headshot/state': 'headshot_state',
     "/health":         None,
     "/reload":         None,
     "/api":            None,
@@ -271,39 +333,57 @@ GET_ROUTES: dict[str, str | None] = {
 }
 
 
+# Explicit allowlist: unknown/new operations default to mutating.
+READ_ACTIONS = {
+    'morph_catalog_live', 'morph_snapshot', 'fitting_state', 'fitting_landmarks', 'fitting_sculpt_state',
+    'headshot_catalog', 'headshot_state',
+    "get_avatars", "get_avatar_info", "get_morph_catalog", "search_morphs",
+    "get_morph_value", "get_camera_info", "get_lights", "get_visual_settings",
+    "get_expression_info", "get_material_info", "list_clothes", "list_hair",
+    "list_accessories", "get_scene_objects", "get_light_info", "get_diffuse_color",
+    "get_material_properties", "get_shader_parameters", "browse_content",
+    "get_export_status", "get_mixer_status",
+}
+
+
 def process_command_queue() -> None:
-    """Drain the queue and execute RLPy calls on the main thread. Called by QTimer."""
+    """Execute at most one command per tick, with cancellation checked atomically."""
     global _processing
     if _processing:
         return
+    operations.heartbeat = time.monotonic()
+    controlled_headshot_modal = operations.modal_dialog_open and headshot.owns_modal()
+    controlled_fitting_modal = operations.modal_dialog_open and fitting.owns_modal()
+    if operations.modal_dialog_open and not (controlled_headshot_modal or controlled_fitting_modal):
+        return
     _processing = True
     try:
-        while not command_queue.empty():
+        try:
+            job = command_queue.get_nowait()
+        except queue.Empty:
+            return
+        try:
+            if ((controlled_headshot_modal and not job['action'].startswith('headshot_')) or
+                (controlled_fitting_modal and not job['action'].startswith('fitting_'))):
+                command_queue.put_nowait(job)
+                return
+            if not operations.start(job):
+                return
+            block = execution_block(job['action'])
+            if block:
+                operations.finish(job, {"success": False, "error": block})
+                return
+            handler = ACTION_MAP.get(job["action"])
             try:
-                cmd = command_queue.get_nowait()
-            except queue.Empty:
-                break
-
-            cmd_id = cmd["id"]
-            action = cmd["action"]
-            params = cmd["params"]
-
-            try:
-                handler = ACTION_MAP.get(action)
-                result = handler(params) if handler else {"success": False, "error": f"Unknown action: {action}"}
-            except Exception as e:
-                print(f"[CC5 MCP Bridge] Action '{action}' failed: {traceback.format_exc()}")
-                result = {"success": False, "error": str(e)}
-
-            with _store_lock:
-                event = response_events.pop(cmd_id, None)
-                if event:
-                    response_store[cmd_id] = result
-                    event.set()
-
+                result = handler(job["params"]) if handler else {"success": False, "error": "Unknown action"}
+            except Exception as error:
+                result = {"success": False, "error": str(error)}
+            operations.finish(job, result)
+        finally:
             command_queue.task_done()
     finally:
         _processing = False
+        operations.heartbeat = time.monotonic()
 
 
 def _validate_params(action: str, params: dict) -> str | None:
@@ -317,40 +397,39 @@ def _validate_params(action: str, params: dict) -> str | None:
     return None
 
 
-def _execute_sync(action: str, params: dict, timeout: float = 30.0) -> tuple[int, Any]:
-    """Queue a command, wait for main-thread execution, return (http_status, result)."""
-    # Validate required params before queueing (returns 400, not 500)
+def _execute_sync(action, params, timeout=30.0, operation_id=None):
     error = _validate_params(action, params)
     if error:
         return 400, {"error": error}
-
-    cmd_id = _next_command_id()
-    event = threading.Event()
-
-    with _store_lock:
-        response_events[cmd_id] = event
-
+    block = execution_block(action)
+    if block:
+        return 403, {"error": block}
+    if action not in READ_ACTIONS and operations.status()['active_operations']:
+        return 409, {"error": "Another operation is running or has unknown outcome; inspect status first"}
+    if operation_id and not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", operation_id):
+        return 400, {"error": "Invalid operation ID"}
     try:
-        command_queue.put_nowait({"id": cmd_id, "action": action, "params": params})
-    except queue.Full:
-        with _store_lock:
-            response_events.pop(cmd_id, None)
-        return 503, {"error": "server busy, command queue full"}
-
-    if not event.wait(timeout=timeout):
-        with _store_lock:
-            response_events.pop(cmd_id, None)
-            response_store.pop(cmd_id, None)
-        return 504, {"error": "Timeout waiting for CC5 to process command"}
-
-    with _store_lock:
-        result = response_store.pop(cmd_id, None)
-        response_events.pop(cmd_id, None)
-
-    if isinstance(result, dict) and result.get("success") is False:
-        return 400, result
-
-    return 200, {"result": result}
+        job, fresh = operations.submit(action, params, operation_id)
+    except ValueError as error:
+        return 409, {"error": str(error)}
+    except RuntimeError as error:
+        return 503, {"error": str(error)}
+    if fresh:
+        try:
+            command_queue.put_nowait(job)
+        except queue.Full:
+            operations.expire(job)
+            return 503, {"error": "Command queue full", "operation": operations.snapshot(job['id'])}
+    if not job['event'].wait(timeout):
+        state = operations.expire(job)
+        if state['state'] not in ('completed', 'failed'):
+            return 504, {"error": "Operation timed out; inspect status, do not retry with a new ID", "operation": state}
+    state = operations.snapshot(job['id'])
+    if state['state'] == 'cancelled':
+        return 409, {"error": "Operation cancelled before execution", "operation": state}
+    if state['state'] == 'failed':
+        return 400, {"error": state['result'].get('error', 'Operation failed'), "operation": state}
+    return 200, {"result": state['result'], "operation": state}
 
 
 def reload_modules() -> dict[str, Any]:
@@ -413,11 +492,33 @@ class BridgeHandler(BaseHTTPRequestHandler):
             raise ValueError("Request body must be a JSON object")
         return parsed
 
+    def _authorized(self):
+        token = self.headers.get("Authorization", "")
+        if not BRIDGE_TOKEN or not hmac.compare_digest(token, "Bearer " + BRIDGE_TOKEN):
+            self._send_json(401, {"error": "Bridge token required"})
+            return False
+        if self.headers.get("Origin"):
+            self._send_json(403, {"error": "Browser-origin requests are not supported"})
+            return False
+        return True
+
     def do_GET(self) -> None:
+        if not self._authorized():
+            return
         path = urlparse(self.path).path
 
         if path == "/health":
-            self._send_json(200, {"result": {"status": "ok", "service": "cc5-mcp-bridge", "version": API_VERSION}})
+            self._send_json(200, {"result": dict(operations.status(), service="cc5-mcp-bridge",
+                version=API_VERSION, paused=paused(), read_only=READ_ONLY)})
+            return
+
+        if path == "/capabilities":
+            self._send_json(200, {"result": get_capabilities()})
+            return
+
+        if path.startswith("/operations/"):
+            state = operations.snapshot(path.rsplit("/", 1)[-1])
+            self._send_json(200 if state else 404, {"result": state} if state else {"error": "Unknown operation in this session"})
             return
 
         if path == "/api":
@@ -428,27 +529,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/reload":
-            if not DEV_MODE and not RELOAD_SECRET:
-                self._send_json(403, {"error": "/reload disabled. Set CC5_DEV_MODE=1 or CC5_RELOAD_SECRET."})
-                return
-            if RELOAD_SECRET:
-                token = self.headers.get("X-Reload-Token", "")
-                if not hmac.compare_digest(token, RELOAD_SECRET):
-                    self._send_json(403, {"error": "Forbidden"})
-                    return
-            result = reload_modules()
-            status = 200 if result.get("success") else 500
-            self._send_json(status, {"result": result})
+            self._send_json(403, {"error": "Runtime reload disabled; restart plugin after reviewing changes"})
             return
 
         action = GET_ROUTES.get(path)
         if action:
-            status, data = _execute_sync(action, {})
+            status, data = _execute_sync(action, {}, operation_id=self.headers.get("X-Operation-ID"))
             self._send_json(status, data)
         else:
             self._send_json(404, {"error": f"Not found: {path}"})
 
     def do_POST(self) -> None:
+        if not self._authorized():
+            return
         path = urlparse(self.path).path
 
         try:
@@ -459,30 +552,30 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         action = POST_ROUTES.get(path)
         if action:
-            if action == "exec_python" and not DEV_MODE and os.environ.get("CC5_ALLOW_EXEC", "").strip().lower() not in ("1", "true", "yes"):
-                self._send_json(403, {"error": "/exec/python disabled. Set CC5_DEV_MODE=1 or CC5_ALLOW_EXEC=1."})
+            if action == "exec_python" and os.environ.get("CC5_ALLOW_EXEC", "").strip().lower() not in ("1", "true", "yes"):
+                self._send_json(403, {"error": "/exec/python disabled. Explicit CC5_ALLOW_EXEC=1 is required."})
                 return
-            status, data = _execute_sync(action, params)
+            status, data = _execute_sync(action, params, operation_id=self.headers.get("X-Operation-ID"))
             self._send_json(status, data)
         else:
             self._send_json(404, {"error": f"Not found: {path}"})
 
 
-class ReusableHTTPServer(HTTPServer):
+class ReusableHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
     allow_reuse_address = True
 
 
 def start_server(port: int = 5101) -> threading.Thread:
     """Start the HTTP bridge server in a background daemon thread."""
     global _httpd
+    if len(BRIDGE_TOKEN) < 32:
+        raise RuntimeError("Set CC5_BRIDGE_TOKEN to a random token of at least 32 characters")
     httpd = ReusableHTTPServer(("127.0.0.1", port), BridgeHandler)
     _httpd = httpd
 
     def run() -> None:
         httpd.serve_forever()
-
-    if not RELOAD_SECRET:
-        print("[CC5 MCP Bridge] WARNING: /reload endpoint has no authentication. Set CC5_RELOAD_SECRET env var to secure it.")
 
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
@@ -494,4 +587,9 @@ def stop_server() -> None:
     global _httpd
     if _httpd is not None:
         _httpd.shutdown()
+        _httpd.server_close()
         _httpd = None
+    with operations.lock:
+        for job in operations.jobs.values():
+            if job['state'] in ('queued', 'running'):
+                operations.expire(job)

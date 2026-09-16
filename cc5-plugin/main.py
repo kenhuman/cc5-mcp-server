@@ -18,6 +18,7 @@ if _plugin_dir not in sys.path:
 
 import RLPy
 from PySide2.QtCore import QTimer  # CC5 uses PySide2
+from PySide2.QtWidgets import QApplication
 
 import server as bridge_server
 
@@ -33,7 +34,7 @@ _timer = None          # 16 ms  — command-queue drain (~60 Hz)
 _health_timer = None   # 5000 ms — watchdog health check (1/5 s)
 _server_thread = None
 
-BRIDGE_PORT = 5101
+BRIDGE_PORT = int(os.environ.get("CC5_BRIDGE_PORT", "5101"))
 HEALTH_CHECK_INTERVAL_MS = 5000   # watchdog cadence
 COMMAND_QUEUE_INTERVAL_MS = 16    # command-dispatch cadence (~60 fps)
 
@@ -52,6 +53,7 @@ def _check_server_health() -> None:
 
 def _on_timer() -> None:
     """16 ms QTimer callback: drain the command queue only."""
+    bridge_server.operations.modal_dialog_open = QApplication.activeModalWidget() is not None
     bridge_server.process_command_queue()
 
 
@@ -63,6 +65,9 @@ def _on_health_timer() -> None:
 def initialize_plugin() -> int:
     """Entry point called by CC5 when the plugin is loaded."""
     global _timer, _health_timer, _server_thread
+
+    if _timer is not None:
+        return RLPy.RStatus.Success
 
     print("[CC5 MCP Bridge] Initializing plugin...")
 

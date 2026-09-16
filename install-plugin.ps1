@@ -1,19 +1,19 @@
-# CC5 MCP Bridge Plugin Installer
-$source = "C:\Users\macka\Projects\cc5-mcp-server\cc5-plugin"
-$dest   = "C:\Program Files\Reallusion\Character Creator 5\Bin64\OpenPlugin\CC5_MCP_Bridge"
-
-if (Test-Path $dest) {
-    Remove-Item -Recurse -Force $dest
-    Write-Host "Removed old plugin." -ForegroundColor Yellow
+# Run with CC5 closed. Installation under Program Files may require elevation.
+[CmdletBinding(SupportsShouldProcess)]
+param([string]$CC5Root = "C:\Program Files\Reallusion\Character Creator 5")
+$ErrorActionPreference = 'Stop'
+$source = Join-Path $PSScriptRoot 'cc5-plugin'
+$destination = Join-Path $CC5Root 'Bin64\OpenPlugin\CC5_MCP_Bridge'
+if (Get-Process -Name CharacterCreator -ErrorAction SilentlyContinue) {
+    throw 'Close CC5 before installing the bridge.'
 }
-
-# Copy plugin files (exclude libs — no longer needed)
-New-Item -ItemType Directory -Force -Path $dest | Out-Null
-Copy-Item "$source\main.py"    $dest
-Copy-Item "$source\server.py"  $dest
-Copy-Item "$source\cc5_api.py" $dest
-Copy-Item "$source\config.json" $dest
-Copy-Item "$source\config.xml"  $dest
-
-Write-Host "Plugin installed to: $dest" -ForegroundColor Green
-Write-Host "Please restart Character Creator 5." -ForegroundColor Cyan
+if (!(Test-Path -LiteralPath (Join-Path $CC5Root 'Bin64\CharacterCreator.exe'))) {
+    throw 'CC5 executable not found. Supply -CC5Root for your installation.'
+}
+if ($PSCmdlet.ShouldProcess($destination, 'Copy MCP plugin modules and configuration')) {
+    New-Item -ItemType Directory -Force -Path $destination | Out-Null
+    Get-ChildItem -LiteralPath $source -File | Where-Object {
+        $_.Extension -in '.py', '.json', '.xml'
+    } | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $destination -Force }
+    Write-Output "Installed to $destination. Set CC5_BRIDGE_TOKEN before launching CC5."
+}

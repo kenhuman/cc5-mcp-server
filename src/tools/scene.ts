@@ -2,9 +2,7 @@
  * Scene and avatar management tools for CC5.
  */
 
-import { execSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -64,7 +62,7 @@ export function registerSceneTools(server: McpServer, bridge: CC5Bridge) {
           content: [{
             type: "text" as const,
             text: connected
-              ? "CC5 bridge is connected and ready."
+              ? "CC5 main thread is responsive. Inspect bridge status for pause/read-only state."
               : "CC5 bridge is NOT responding. Make sure Character Creator 5 is running with the MCP Bridge plugin loaded.",
           }],
         };
@@ -130,27 +128,10 @@ export function registerSceneTools(server: McpServer, bridge: CC5Bridge) {
           return { content: [{ type: "text" as const, text: `Failed: ${result.error}` }] };
         }
 
-        // Fallback: if RenderImage succeeded but returned no image data, use Windows screenshot
+        // Never capture the desktop as a fallback for a missing viewport.
         if (!base64Data) {
-          const fallbackPath = output_path ?? path.join(os.tmpdir(), "cc5_viewport.png");
-          try {
-            // Write to a FIXED temp path passed via an env var — never interpolate the
-            // caller-controlled path into the PowerShell command (command-injection guard).
-            const psTmp = path.join(os.tmpdir(), "cc5_screen_capture.png");
-            const psCmd = `Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $s=[System.Windows.Forms.Screen]::PrimaryScreen; $b=New-Object System.Drawing.Bitmap($s.Bounds.Width,$s.Bounds.Height); $g=[System.Drawing.Graphics]::FromImage($b); $g.CopyFromScreen($s.Bounds.Location,[System.Drawing.Point]::Empty,$s.Bounds.Size); $b.Save($env:CC5_CAP_TMP); $g.Dispose(); $b.Dispose()`;
-            execSync(`powershell -NoProfile -Command "${psCmd}"`, {
-              timeout: 15000,
-              env: { ...process.env, CC5_CAP_TMP: psTmp },
-            });
-            if (fs.existsSync(psTmp)) {
-              fs.copyFileSync(psTmp, fallbackPath);
-              const data = fs.readFileSync(fallbackPath);
-              base64Data = data.toString("base64");
-              imgPath = fallbackPath;
-            }
-          } catch {
-            // Fallback also failed
-          }
+          return { isError: true, content: [{ type: "text" as const,
+            text: "Viewport capture returned no image data; desktop fallback is disabled." }] };
         }
 
         const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [];

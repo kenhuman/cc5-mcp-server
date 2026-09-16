@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { registerFittingTools } from "./tools/fitting.js";
 
 /**
  * CC5 MCP Server - Entry Point
@@ -29,11 +30,13 @@ import { registerScriptingTools } from "./tools/scripting.js";
 import { registerMetaHumanTools } from "./tools/metahuman.js";
 import { registerActorMixerTools } from "./tools/actor-mixer.js";
 import { registerMorphResources } from "./resources/morphs.js";
+import { registerDiagnosticsTools } from "./tools/diagnostics.js";
+import { registerHeadshotTools } from "./tools/headshot.js";
 
 async function main() {
   const server = new McpServer({
     name: "cc5-mcp-server",
-    version: "1.1.0",
+    version: "1.2.0",
   });
 
   // Bridge to CC5's Python plugin HTTP server
@@ -41,6 +44,9 @@ async function main() {
 
   // Register all tools
   registerMorphTools(server, bridge);
+  registerDiagnosticsTools(server, bridge);
+  registerHeadshotTools(server, bridge);
+  registerFittingTools(server, bridge);
   registerSceneTools(server, bridge);
   registerAssetTools(server, bridge);
   registerCharacterTools(server, bridge);

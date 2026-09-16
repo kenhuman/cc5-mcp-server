@@ -200,96 +200,24 @@ def search_morphs(query: str, category: str = "") -> list[dict[str, str]]:
 
 
 def get_morph_value(morph_id: str) -> dict[str, Any]:
-    """Get current value of a shaping morph slider."""
-    error = _validate_morph_id(morph_id)
-    if error:
-        return {"success": False, "error": error}
-    avatar = get_first_avatar()
-    if not avatar:
-        return {"success": False, "error": "No avatar in scene"}
-
-    shaping_comp = avatar.GetAvatarShapingComponent()
-    if not shaping_comp:
-        return {"success": False, "error": "No shaping component found"}
-
-    value = shaping_comp.GetShapingMorphWeight(morph_id)
-    return {"success": True, "morph_id": morph_id, "value": value}
+    import morph_control
+    data = morph_control.catalog(query=morph_id)
+    found = [m for m in data['morphs'] if m['morph_id'] == morph_id]
+    if len(found) != 1: return {'success': False, 'error': 'Unknown morph ID'}
+    return dict(found[0], success=True, avatar_id=data['avatar_id'])
 
 
 def set_morph_value(morph_id: str, value: float) -> dict[str, Any]:
-    """Set a shaping morph slider value (0.0 - 1.0)."""
-    error = _validate_morph_id(morph_id)
-    if error:
-        return {"success": False, "error": error}
-    avatar = get_first_avatar()
-    if not avatar:
-        return {"success": False, "error": "No avatar in scene"}
-
-    shaping_comp = avatar.GetAvatarShapingComponent()
-    if not shaping_comp:
-        return {"success": False, "error": "No shaping component found"}
-
-    # Validate morph ID exists
-    known_ids = _get_all_morph_ids()
-    if known_ids and morph_id not in known_ids:
-        return {"success": False, "error": f"Unknown morph ID: {morph_id}"}
-
-    value = max(-1.0, min(1.0, value))
-    try:
-        RLPy.RGlobal.BeginAction("Set Morph")
-        shaping_comp.SetShapingMorphWeight(morph_id, value)
-        RLPy.RGlobal.ObjectModified(avatar, RLPy.EObjectModifiedType_Attribute)
-    finally:
-        RLPy.RGlobal.EndAction()
-
-    return {"success": True, "morph_id": morph_id, "value": value}
+    import morph_control
+    return morph_control.apply([{'morph_id': morph_id, 'value': value}])
 
 
 MAX_MORPH_BATCH = 500
 
 
 def set_multiple_morphs(morphs: list[dict[str, Any]]) -> dict[str, Any]:
-    """Set multiple morph values at once. Each entry: {"morph_id": str, "value": float} (also accepts "id")."""
-    if len(morphs) > MAX_MORPH_BATCH:
-        return {"success": False, "error": f"Too many morphs: {len(morphs)}, max {MAX_MORPH_BATCH}"}
-    avatar = get_first_avatar()
-    if not avatar:
-        return {"success": False, "error": "No avatar in scene"}
-
-    shaping_comp = avatar.GetAvatarShapingComponent()
-    if not shaping_comp:
-        return {"success": False, "error": "No shaping component found"}
-
-    # Normalize and validate all entries before applying any
-    normalized: list[tuple[str, float]] = []
-    for morph in morphs:
-        morph_id = morph.get("morph_id", morph.get("id"))
-        if not morph_id or "value" not in morph:
-            return {"success": False, "error": "Morph entry missing 'morph_id' or 'value'"}
-        error = _validate_morph_id(morph_id)
-        if error:
-            return {"success": False, "error": error}
-        normalized.append((morph_id, float(morph["value"])))
-
-    # Validate morph IDs
-    known_ids = _get_all_morph_ids()
-    if known_ids:
-        unknown = [mid for mid, _ in normalized if mid not in known_ids]
-        if unknown:
-            return {"success": False, "error": f"Unknown morph ID(s): {', '.join(unknown)}"}
-
-    try:
-        RLPy.RGlobal.BeginAction("Set Multiple Morphs")
-        results = []
-        for morph_id, raw_value in normalized:
-            value = max(-1.0, min(1.0, raw_value))
-            shaping_comp.SetShapingMorphWeight(morph_id, value)
-            results.append({"morph_id": morph_id, "value": value})
-
-        RLPy.RGlobal.ObjectModified(avatar, RLPy.EObjectModifiedType_Attribute)
-    finally:
-        RLPy.RGlobal.EndAction()
-    return {"success": True, "applied": results}
+    import morph_control
+    return morph_control.apply(morphs)
 
 
 def _get_cc5_root() -> str:
@@ -737,18 +665,8 @@ public class Win32 {
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
 }
 '@
-$proc = Get-Process -Name "CharacterCreator*" -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $proc -or $proc.MainWindowHandle -eq [IntPtr]::Zero) {
-    $screen = [System.Windows.Forms.Screen]::PrimaryScreen
-    Add-Type -AssemblyName System.Windows.Forms
-    $bitmap = New-Object System.Drawing.Bitmap($screen.Bounds.Width, $screen.Bounds.Height)
-    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-    $graphics.CopyFromScreen($screen.Bounds.Location, [System.Drawing.Point]::Empty, $screen.Bounds.Size)
-    $bitmap.Save($OutputPath)
-    $graphics.Dispose()
-    $bitmap.Dispose()
-    exit
-}
+$proc = Get-Process -Id $env:CC5_CAPTURE_PID -ErrorAction SilentlyContinue
+if (-not $proc -or $proc.MainWindowHandle -eq [IntPtr]::Zero) { exit 1 }
 $rect = New-Object Win32+RECT
 [Win32]::GetWindowRect($proc.MainWindowHandle, [ref]$rect) | Out-Null
 $w = $rect.Right - $rect.Left
@@ -764,7 +682,8 @@ $bitmap.Dispose()
     result = subprocess.run(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script,
          "-OutputPath", output_path],
-        capture_output=True, timeout=10,
+        capture_output=True, timeout=10, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        env=dict(os.environ, CC5_CAPTURE_PID=str(os.getpid())),
     )
     if result.returncode != 0:
         stderr_text = result.stderr.decode("utf-8", errors="replace").strip()
@@ -838,7 +757,7 @@ def capture_viewport(output_path: str = "", width: int = 1280, height: int = 720
                 _render_image_broken = True
 
         # Fallback: Windows screenshot of CC5 viewport
-        if not os.path.exists(output_path):
+        if not os.path.exists(output_path) and os.environ.get("CC5_ALLOW_WINDOW_CAPTURE") == "1":
             try:
                 _capture_window_screenshot(output_path)
             except Exception as e:
@@ -2399,12 +2318,12 @@ def exec_python(code: str) -> dict[str, Any]:
     # is present. Keeps arbitrary code execution off by default in production.
     # NOTE: deliberately NOT gated on CC5_RELOAD_SECRET — exec must not be enabled
     # as a side effect of securing /reload. Gate only on dev mode / explicit exec opt-in.
-    dev_mode = os.environ.get("CC5_DEV_MODE", "1").strip().lower() not in ("0", "false", "no", "")
+    dev_mode = os.environ.get("CC5_DEV_MODE", "0").strip().lower() not in ("0", "false", "no", "")
     allow_exec = os.environ.get("CC5_ALLOW_EXEC", "").strip().lower() in ("1", "true", "yes")
-    if not dev_mode and not allow_exec:
+    if not allow_exec:
         return {
             "success": False,
-            "error": "/exec/python disabled. Set CC5_DEV_MODE=1 or CC5_ALLOW_EXEC=1.",
+            "error": "/exec/python disabled. Explicit CC5_ALLOW_EXEC=1 is required.",
         }
 
     if not isinstance(code, str):
@@ -3086,17 +3005,7 @@ def silent_install_filter(output_dir: str, character_name: str) -> dict[str, Any
         u32.GetClassNameW.restype = ctypes.c_int
 
         # Get CC5's PID for filtering
-        cc_pid = 0
-        try:
-            import subprocess
-            r = subprocess.run(
-                ["tasklist", "/FI", "IMAGENAME eq CharacterCreator.exe", "/FO", "CSV", "/NH"],
-                capture_output=True, text=True, timeout=5,
-            )
-            line = r.stdout.strip().splitlines()[0] if r.stdout else ""
-            cc_pid = int(line.split(",")[1].strip('"')) if "," in line else 0
-        except Exception as e:
-            handler_log.append(f"PID lookup failed: {e}")
+        cc_pid = os.getpid()
 
         VK_RETURN = 0x0D
         KEYEVENTF_KEYUP = 0x0002

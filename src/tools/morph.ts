@@ -29,7 +29,7 @@ export function registerMorphTools(server: McpServer, bridge: CC5Bridge) {
     "Adjust a single morph slider on the current character. Use get_morph_catalog first to discover available morph IDs.",
     {
       morph_id: z.string().describe("The morph slider ID (e.g., 'Fat', 'Head_Narrow', 'Nose_Size')"),
-      value: z.number().min(-1).max(1).describe("Morph value between -1.0 and 1.0. Negative values shrink features."),
+      value: z.number().min(-1).max(1).describe("Absolute native weight. Consult get_anatomy_morphs for the slider-specific range and meaning."),
     },
     async ({ morph_id, value }) => bridgeCall(
       () => bridge.setMorph(morph_id, value),
@@ -43,7 +43,7 @@ export function registerMorphTools(server: McpServer, bridge: CC5Bridge) {
     {
       morphs: z.array(z.object({
         morph_id: z.string().max(256).describe("Morph slider ID"),
-        value: z.number().min(-1).max(1).describe("Value -1.0 to 1.0"),
+        value: z.number().min(-1).max(1).describe("Absolute weight within the slider-specific native range"),
       })).max(500).describe("Array of morph adjustments (max 500)"),
     },
     async ({ morphs }) => bridgeCall(

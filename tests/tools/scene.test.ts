@@ -33,6 +33,12 @@ beforeEach(() => {
 // ── registration ──────────────────────────────────────────────────────────────
 
 describe("registerSceneTools – registration", () => {
+  it("fails explicitly when viewport image data is absent", async () => {
+    bridge.captureViewport.mockResolvedValue({ success: true, path: "C:/missing.png" });
+    const result = await server.getRegisteredTool("capture_viewport")({});
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("desktop fallback is disabled");
+  });
   it("registers exactly 7 tools", () => {
     expect(server.tool).toHaveBeenCalledTimes(7);
   });
@@ -218,7 +224,7 @@ describe("check_cc5_connection handler", () => {
     bridge.healthCheck.mockResolvedValue(true);
     const handler = server.getRegisteredTool("check_cc5_connection");
     const result = await handler({});
-    expect(result.content[0].text).toContain("connected and ready");
+    expect(result.content[0].text).toContain("main thread is responsive");
   });
 
   it("returns not-responding message when healthCheck returns false", async () => {

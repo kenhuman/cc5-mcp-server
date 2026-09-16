@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 /**
  * HTTP client for communicating with the CC5 Python bridge plugin.
  */
@@ -80,13 +81,14 @@ export class CC5Bridge {
     method: "GET" | "POST" = "GET",
     body?: unknown
   ): Promise<T> {
+    const operationId = randomUUID();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
     try {
       const options: RequestInit = {
         method,
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${process.env.CC5_BRIDGE_TOKEN ?? ""}`, "X-Operation-ID": operationId },
         signal: controller.signal,
       };
 
@@ -114,17 +116,39 @@ export class CC5Bridge {
       }
 
       return data.result;
+    } catch (error) {
+      throw new Error(`${error instanceof Error ? error.message : String(error)} [operation_id=${operationId}; inspect get_operation_status before repeating a scene change]`);
     } finally {
       clearTimeout(timeout);
     }
   }
 
+  async getBridgeStatus(): Promise<Record<string, unknown>> {
+    return this.request<Record<string, unknown>>("/health");
+  }
+
+  async headshot(action: "catalog" | "state" | "open" | "configure" | "generate", params: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    const read = ["catalog", "state"].includes(action);
+    return this.request<Record<string, unknown>>(`/headshot/${action}`, read ? "GET" : "POST", read ? undefined : params);
+  }
+
+  async getCapabilities(): Promise<Record<string, unknown>> {
+    return this.request<Record<string, unknown>>("/capabilities");
+  }
+
+  async fittingControl(group: "morph-control" | "fitting", action: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+    return this.request<Record<string, unknown>>(`/${group}/${action}`, "POST", params);
+  }
+
+  async getOperationStatus(id: string): Promise<Record<string, unknown>> {
+    return this.request<Record<string, unknown>>(`/operations/${encodeURIComponent(id)}`);
+  }
+
   async healthCheck(): Promise<boolean> {
     try {
-      await this.request<{ status: string }>("/health");
-      return true;
-    } catch (err) {
-      console.error("[CC5 Bridge] healthCheck failed:", err);
+      const status = await this.getBridgeStatus();
+      return status.main_thread_responsive === true;
+    } catch {
       return false;
     }
   }

@@ -1,6 +1,6 @@
 {
   "name": "cc5-mcp-server",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "MCP Server for Reallusion Character Creator 5 - AI-powered character creation via natural language",
   "type": "module",
   "main": "./build/index.js",
@@ -33,5 +33,13 @@
     "ai",
     "3d-character"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kenhuman/cc5-mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kenhuman/cc5-mcp-server/issues"
+  },
+  "homepage": "https://github.com/kenhuman/cc5-mcp-server#readme"
 }

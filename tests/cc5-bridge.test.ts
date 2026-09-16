@@ -117,8 +117,27 @@ describe("CC5Bridge constructor", () => {
 // ── healthCheck ───────────────────────────────────────────────────────────────
 
 describe("CC5Bridge.healthCheck", () => {
+  it("does not mistake HTTP liveness for main-thread health", async () => {
+    mockFetch({ result: { status: "ok", main_thread_responsive: false } });
+    expect(await bridge.healthCheck()).toBe(false);
+  });
+
+  it("attaches authentication and reports operation IDs on network failure", async () => {
+    const previous = process.env.CC5_BRIDGE_TOKEN;
+    process.env.CC5_BRIDGE_TOKEN = "test-token";
+    try {
+      mockFetchError("network unavailable");
+      await expect(bridge.getAvatars()).rejects.toThrow(/operation_id=/);
+      const headers = vi.mocked(fetch).mock.calls[0][1]?.headers as Record<string, string>;
+      expect(headers.Authorization).toBe("Bearer test-token");
+      expect(headers["X-Operation-ID"]).toMatch(/^[a-f0-9-]+$/);
+    } finally {
+      if (previous === undefined) delete process.env.CC5_BRIDGE_TOKEN;
+      else process.env.CC5_BRIDGE_TOKEN = previous;
+    }
+  });
   it("returns true when the bridge responds successfully", async () => {
-    mockFetch<{ status: string }>({ result: { status: "ok" } });
+    mockFetch({ result: { main_thread_responsive: true } });
     const result = await bridge.healthCheck();
     expect(result).toBe(true);
   });
@@ -697,7 +716,7 @@ describe("CC5Bridge internal request handling", () => {
     expect(vi.mocked(fetch)).toHaveBeenCalledWith(
       expect.any(String),
       expect.objectContaining({
-        headers: { "Content-Type": "application/json" },
+        headers: expect.objectContaining({ "Content-Type": "application/json", "X-Operation-ID": expect.any(String) }),
       })
     );
   });

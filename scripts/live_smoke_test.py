@@ -22,6 +22,8 @@ import tempfile
 import urllib.request
 
 BASE = os.environ.get("CC5_BRIDGE_URL", "http://127.0.0.1:5101")
+if os.environ.get("CC5_LIVE_TEST") != "1" or len(os.environ.get("CC5_BRIDGE_TOKEN", "")) < 32:
+    raise SystemExit("Set CC5_LIVE_TEST=1 and CC5_BRIDGE_TOKEN; use a disposable project.")
 P, F, S = [], [], []
 
 
@@ -29,7 +31,7 @@ def call(method, path, body=None, timeout=120):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
         BASE + path, data=data, method=method,
-        headers={"Content-Type": "application/json"})
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + os.environ["CC5_BRIDGE_TOKEN"]})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, json.loads(r.read().decode())
